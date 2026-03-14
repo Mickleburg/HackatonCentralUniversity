@@ -52,3 +52,7 @@ temp/
 # OS files
 .DS_Store
 Thumbs.db
+ml/models/ner/
+*.pt
+*.safetensors
+checkpoints/
