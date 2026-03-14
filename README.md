@@ -1,237 +1,621 @@
-PII Detection Pipeline
+# PII NER Detection System
 
-Обнаружение персональной информации в русскоязычных текстах.
+Production-grade система для детекции PII в русском тексте.
 
-Задача
+Проект объединяет три подхода:
+- regex-детектор для точных правил;
+- BERT-based NER для сложных сущностей;
+- merge-слой для объединения результатов с приоритетом regex.
 
-Найти в тексте сущности категорий: ФИО, паспорт, телефон, email, СНИЛС, адрес, место работы.
+Финальный формат предсказаний:
+`List[Tuple[int, int, str]]`
 
-Входные данные
+Где:
+- `start_char` — включительная позиция начала;
+- `end_char` — исключительная позиция конца;
+- `category` — тип сущности.
 
-CSV с полями id, text.
+---
 
-Выходные данные
+## Назначение
 
-Список кортежей (start, end, category). Каждый кортеж содержит:
-- start: начало сущности (символьная координата)
-- end: конец сущности (символьная координата)
-- category: категория сущности
+Система ищет персональные и чувствительные данные в русском тексте и возвращает точные символьные координаты найденных сущностей.
 
-Если сущностей не найдено, выход пуст: []
+Проект рассчитан на локальный запуск без внешних LLM API, что упрощает безопасное использование в production-сценариях.
 
-Архитектура решения
+---
 
-Трёхуровневый пайплайн:
+## Архитектура
 
-1. Regex detector
-Детерминированное сопоставление с паттернами.
-Скорость: <1мс на документ.
-Паттерны хранятся в configs/patterns/.
-Подходит для жёстко структурированных форматов (паспорт, СНИЛС, телефон).
+Пайплайн состоит из трех независимых частей.
 
-2. NER model
-ruBERT (DeepPavlov) fine-tuned для token classification.
-BIO схема с автоматическим выравниванием по символьным координатам.
-Ловит менее формализуемые сущности (ФИО в контексте, места работы).
+### 1. Regex Detector
 
-3. Merge layer
-При конфликте спанов regex побеждает NER (regex точнее на жёстких шаблонах).
-Неконфликтующие спаны объединяются.
-Результат: отсортирован по позиции, без пересечений.
+Regex-детектор отвечает за высокоточные сущности с устойчивым форматом:
+- паспортные данные;
+- телефоны;
+- email;
+- банковские карты;
+- номера счетов;
+- СНИЛС;
+- ИНН;
+- API-ключи и другие шаблонные объекты.
 
-Почему именно такой merge
+Преимущества regex-слоя:
+- высокая точность на структурированных данных;
+- быстрый запуск;
+- предсказуемое поведение;
+- отсутствие зависимости от модели.
 
-Regex на жёстких форматах: паспорт 99.8% точности против 94.2% NER.
-NER ловит естественноязычные контексты, которые regex не может.
-При пересечении regex имеет приоритет (меньше false positives).
-Каждый метод решает свою задачу, результат дополняют друг друга.
+### 2. NER Model
 
-Качество
+NER-модель решает задачу token classification и используется там, где одних правил недостаточно.
 
-Strict span F1: сущность считается верной, если совпадают start, end и category.
-Вычисляется как Precision = TP/(TP+FP), Recall = TP/(TP+FN), F1 = 2*P*R/(P+R).
-На валидационном наборе: micro-F1 ≈ 0.92, macro-F1 ≈ 0.91.
+Обычно сюда относятся сущности, которые хуже описываются шаблонами:
+- `PERSON_NAME`;
+- `ADDRESS`;
+- часть пограничных или контекстно-зависимых случаев.
 
-Структура проекта
+### 3. Merge Layer
 
-  pii-detection/
-  ├── configs/
-  │   ├── base.yaml                  конфиг обучения и инженса
-  │   └── patterns/                  regex паттерны по категориям
-  ├── data/
-  │   ├── raw/                       входные CSV файлы
-  │   ├── processed/                 генерируется prepare_data.py
-  │   └── answer/                    генерируется predict_*.py
-  ├── models/
-  │   └── ner_checkpoint/            обученная модель (после train_ner.py)
-  ├── logs/                          логи запусков
-  ├── results/                       результаты evaluate.py
-  ├── scripts/
-  │   ├── prepare_data.py
-  │   ├── train_ner.py
-  │   ├── predict_regex.py
-  │   ├── predict_ner.py
-  │   ├── predict_merged.py
-  │   ├── evaluate.py
-  │   └── run_tests.py
-  ├── src/
-  │   ├── utils/
-  │   ├── data/
-  │   ├── regex/
-  │   ├── ner/
-  │   ├── merge/
-  │   └── metrics/
-  ├── tests/
-  ├── requirements.txt
-  ├── .env.example
-  └── README.md
+Merge-слой объединяет результаты regex и NER в единый итоговый список сущностей.
+
+Он делает следующее:
+- удаляет пересечения;
+- разрешает конфликты;
+- убирает дубликаты;
+- сортирует сущности по позиции;
+- сохраняет приоритет regex над NER.
+
+---
+
+## Поддерживаемые категории
+
+Проект поддерживает следующие типы PII:
+- `PASSPORT`
+- `SNILS`
+- `INN`
+- `PHONE`
+- `EMAIL`
+- `CARD`
+- `ACCOUNT`
+- `ADDRESS`
+- `API_KEY`
+- `PERSON_NAME`
+
+При необходимости список категорий можно расширять через правила, данные и конфигурацию модели.
+
+---
+
+## Структура проекта
+
+```text
+pii_ner_project/
+├─ README.md
+├─ requirements.txt
+├─ .env.example
+├─ Makefile
+├─ configs/
+│  └─ base.yaml
+├─ data/
+│  ├─ raw/
+│  ├─ processed/
+│  └─ answer/
+├─ models/
+├─ results/
+├─ src/
+│  ├─ __init__.py
+│  ├─ utils/
+│  │  ├─ __init__.py
+│  │  ├─ types.py
+│  │  ├─ io.py
+│  │  ├─ logging_utils.py
+│  │  └─ config.py
+│  ├─ data/
+│  │  ├─ __init__.py
+│  │  ├─ schemas.py
+│  │  ├─ loader.py
+│  │  └─ processor.py
+│  ├─ regex/
+│  │  ├─ __init__.py
+│  │  ├─ patterns.py
+│  │  └─ detector.py
+│  ├─ ner/
+│  │  ├─ __init__.py
+│  │  ├─ tokenizer.py
+│  │  ├─ model.py
+│  │  ├─ dataset.py
+│  │  ├─ trainer.py
+│  │  └─ inference.py
+│  ├─ merge/
+│  │  ├─ __init__.py
+│  │  ├─ merger.py
+│  │  └─ span_utils.py
+│  └─ metrics/
+│     ├─ __init__.py
+│     └─ strict_span_f1.py
+├─ scripts/
+│  ├─ prepare_data.py
+│  ├─ train_ner.py
+│  ├─ predict_regex.py
+│  ├─ predict_ner.py
+│  ├─ predict_merged.py
+│  ├─ evaluate.py
+│  └─ run_tests.py
+└─ tests/
+   ├─ __init__.py
+   ├─ fixtures.py
+   ├─ test_regex.py
+   ├─ test_ner.py
+   ├─ test_merge.py
+   ├─ test_data.py
+   └─ test_metrics.py
+```
+
+Если у тебя часть скриптов или путей названа иначе, перед первым запуском синхронизируй README с реальной структурой репозитория.
+
+Если у тебя часть скриптов или путей названа иначе, перед первым запуском синхронизируй README с реальной структурой репозитория.
+
+Требования
+Python 3.11
+
+pip
+
+GPU с CUDA — опционально, но желательно для обучения и быстрого инференса
+
+Linux, macOS или Windows
 
 Установка
+Склонируй репозиторий:
 
-  pip install -r requirements.txt
+bash
+git clone <repo_url>
+cd pii_ner_project
+Создай виртуальное окружение:
 
-Подготовка данных
+bash
+python3.11 -m venv venv
+source venv/bin/activate
+Для Windows:
 
-Конвертировать CSV в JSONL с BIO labels:
+bash
+venv\Scripts\activate
+Установи зависимости:
 
-  python scripts/prepare_data.py \
-    --raw-train data/raw/train.csv \
-    --raw-valid data/raw/valid.csv \
-    --output-dir data/processed \
-    --random-seed 42
+bash
+pip install -r requirements.txt
+Если проект использует .env, создай файл из шаблона:
 
-Результат: data/processed/train.jsonl, data/processed/valid.jsonl
+bash
+cp .env.example .env
+После этого при необходимости отредактируй:
 
-Обучение NER
+.env
 
-  python scripts/train_ner.py \
-    --config configs/base.yaml \
-    --train-data data/processed/train.jsonl \
-    --valid-data data/processed/valid.jsonl \
-    --output-dir models/ner_checkpoint
+configs/base.yaml
 
-Результат: обученная модель в models/ner_checkpoint/model
+Что проверять сначала
+Сначала нужно убедиться, что проект хотя бы базово согласован:
 
-По умолчанию: 3 эпохи, batch size 16, learning rate 2e-5, early stopping после 3 эпох без улучшения.
-Ожидаемое время на GPU A100: ~30 минут.
+импорты не сломаны;
 
-Инженс
+тестовая обвязка поднимается;
 
-Regex-only (быстро, без NER):
+merge-логика работает;
 
-  python scripts/predict_regex.py \
-    --test-data data/raw/test.csv \
-    --output data/answer/predictions_regex.csv
+CLI-скрипты запускаются.
 
-NER-only (медленнее, требует GPU):
+Установи зависимости:
 
-  python scripts/predict_ner.py \
-    --model-path models/ner_checkpoint/model \
-    --test-data data/raw/test.csv \
-    --output data/answer/predictions_ner.jsonl
+bash
+pip install -r requirements.txt
+Запусти все тесты:
 
-Merged (рекомендуется, regex + NER с merge):
+bash
+python scripts/run_tests.py --all
+Если хочешь проверить только merge-логику:
 
-  python scripts/predict_merged.py \
-    --test-data data/raw/test.csv \
-    --model-path models/ner_checkpoint/model \
-    --output data/answer/final_predictions.csv \
-    --merge-strategy regex_priority \
-    --device cuda
+bash
+python scripts/run_tests.py --file tests/test_merge.py
+Если хочешь посмотреть покрытие:
 
-Результат: data/answer/final_predictions.csv (стандартный формат для submit)
+bash
+python scripts/run_tests.py --all --coverage
+Если run_tests.py в проекте пока нет, можно запускать напрямую через pytest:
 
-Оценка
+bash
+pytest tests/ -v
+Только merge-тесты:
 
-Вычислить strict span F1 против gold меток:
+bash
+pytest tests/test_merge.py -v
+С покрытием:
 
-  python scripts/evaluate.py \
-    --gold data/gold.csv \
-    --pred data/answer/final_predictions.csv \
-    --output results/evaluation.json
+bash
+pytest --cov=src tests/
+Если тесты проходят, значит структура импортов, merge-логика и базовые CLI-сценарии хотя бы минимально согласованы.
 
-Архитектурные решения
+Как запускать пайплайн локально
+Ниже минимальная рабочая последовательность.
 
-Low latency
+1. Подготовка данных
+Если у тебя уже есть:
 
-Regex: <1мс (CPU).
-NER batch inference: ~15мс на doc (GPU A100).
-Merged: ~15мс на doc (латность доминирует NER).
-Рекомендация для prod: 1 GPU A100 = ~60 docs/sec.
+data/processed/train.jsonl
 
-Безопасное хранение
+data/processed/valid.jsonl
 
-On-premises: все компоненты работают локально.
-Нет передачи PII во внешние LLM/API.
-Логирование без raw PII (только метрики и span coords).
-Модели хранятся с ограничением доступа.
+этот шаг можно пропустить.
 
-Добавление новых категорий
+Иначе:
 
-1. Добавить паттерны в configs/patterns/<category>.yaml
-2. Добавить категорию в configs/base.yaml (categories: [..., NEW_CATEGORY])
-3. Переобучить: python scripts/train_ner.py
-4. Инженс автоматически использует новую категорию.
+bash
+python scripts/prepare_data.py \
+  --raw-train data/raw/train.csv \
+  --raw-valid data/raw/valid.csv \
+  --output-dir data/processed
+2. Обучение NER
+bash
+python scripts/train_ner.py \
+  --config configs/base.yaml \
+  --train-data data/processed/train.jsonl \
+  --valid-data data/processed/valid.jsonl \
+  --output-dir models/ner_checkpoint
+3. Инференс regex-only
+bash
+python scripts/predict_regex.py \
+  --test-data data/raw/private_test_dataset.csv \
+  --output data/answer/predictions_regex.csv
+4. Инференс NER-only
+bash
+python scripts/predict_ner.py \
+  --model-path models/ner_checkpoint/model \
+  --test-data data/raw/private_test_dataset.csv \
+  --output data/answer/predictions_ner.jsonl \
+  --device cuda
+Если GPU нет:
 
-Рост нагрузки x10
+bash
+python scripts/predict_ner.py \
+  --model-path models/ner_checkpoint/model \
+  --test-data data/raw/private_test_dataset.csv \
+  --output data/answer/predictions_ner.jsonl \
+  --device cpu
+5. Финальный merged inference
+bash
+python scripts/predict_merged.py \
+  --test-data data/raw/private_test_dataset.csv \
+  --model-path models/ner_checkpoint/model \
+  --output data/answer/final_predictions.csv \
+  --merge-strategy regex_priority \
+  --device cuda
+Если GPU нет:
 
-Stateless инженс: каждый процесс независим.
-Horizontally scalable: добавьте ещё GPU/машин.
-Batching: скопируйте скрипт, добавьте loop по chunks.
+bash
+python scripts/predict_merged.py \
+  --test-data data/raw/private_test_dataset.csv \
+  --model-path models/ner_checkpoint/model \
+  --output data/answer/final_predictions.csv \
+  --merge-strategy regex_priority \
+  --device cpu
+Быстрый сценарий запуска
+Если нужен самый короткий практический сценарий, делай так:
 
-Streaming demasking (концепт)
+Установи зависимости.
 
-На уровне API gateway:
-1. Входящий текст проходит sanitizer → маски PII.
-2. Маски отправляются в downstream систему (безопасно).
-3. На выходе demask gateway восстанавливает PII по policy.
-Имплементация: простой wrapper вокруг predict().
+Запусти тесты.
+
+Подготовь данные, если они еще не подготовлены.
+
+Обучи NER-модель.
+
+Построй regex-only предсказания.
+
+Построй NER-only предсказания.
+
+Построй финальный merged-файл.
+
+Проверь итоговый CSV.
+
+Если есть gold-разметка, посчитай метрики.
+
+Куда складываются артефакты
+После запуска артефакты обычно лежат здесь.
+
+Подготовленные данные:
+
+data/processed/train.jsonl
+
+data/processed/valid.jsonl
+
+Чекпоинт модели:
+
+models/ner_checkpoint/model/
+
+models/ner_checkpoint/labeler.json
+
+Предсказания:
+
+regex-only: data/answer/predictions_regex.csv
+
+ner-only: data/answer/predictions_ner.jsonl
+
+финальный merged: data/answer/final_predictions.csv
+
+Оценка:
+
+results/evaluation.json
+
+Итоговый файл для сабмита обычно:
+
+data/answer/final_predictions.csv
+
+Форматы данных
+Обучающая выборка
+Ожидается файл с текстом и списком сущностей.
+
+Пример:
+
+text
+text	entities
+Паспорт: 12 34 567890	[{"start": 9, "end": 20, "category": "PASSPORT"}]
+Звоните: +7-999-123-45-67	[{"start": 9, "end": 24, "category": "PHONE"}]
+Тестовая выборка
+Тестовый файл содержит идентификатор и текст.
+
+Пример:
+
+text
+id,text
+1,"Личные данные..."
+2,"Контактная информация..."
+Формат предсказаний
+Внутренне сущности должны быть представлены как:
+
+python
+[(start, end, category)]
+Пример:
+
+python
+[(9, 20, "PASSPORT")]
+Если для сабмита нужен CSV, он должен соответствовать формату, который ожидает организатор задачи.
+
+Как проверить результат
+Если есть gold-разметка, запускай:
+
+bash
+python scripts/evaluate.py \
+  --gold data/gold.csv \
+  --pred data/answer/final_predictions.csv \
+  --output results/evaluation.json
+Скрипт должен вернуть:
+
+precision
+
+recall
+
+f1
+
+Если gold-разметки нет, проверь хотя бы:
+
+что итоговый CSV создался;
+
+что файл не пустой;
+
+что есть колонки id,prediction;
+
+что prediction имеет вид [(10, 20, 'CATEGORY')] или [];
+
+что между спанами нет пересечений;
+
+что regex-сущности не были затерты NER-сущностями;
+
+что сущности отсортированы по позиции в тексте.
+
+Для быстрой ручной проверки:
+
+открой первые строки CSV;
+
+выбери 20–30 примеров;
+
+сравни координаты с исходным текстом;
+
+убедись, что координаты действительно попадают в нужные подстроки.
+
+Метрика
+Основная метрика качества:
+Micro F1
+
+Предсказание считается правильным только если одновременно совпали:
+
+начало спана;
+
+конец спана;
+
+категория.
+
+Частичное пересечение сущностей правильным ответом не считается.
+
+Именно поэтому в проекте критично сохранять корректные offset mapping, не ломать границы сущностей и не допускать конфликтов после merge.
+
+Конфигурация
+Базовая конфигурация лежит в:
+
+text
+configs/base.yaml
+Пример:
+
+text
+paths:
+  data_dir: data/
+  model_dir: models/
+
+training:
+  epochs: 10
+  batch_size: 32
+  learning_rate: 2e-5
+  device: cuda
+
+inference:
+  batch_size: 64
+  device: cuda
+Перед запуском проверь:
+
+пути к данным;
+
+выходные директории;
+
+device;
+
+batch_size;
+
+learning_rate;
+
+число эпох;
+
+параметры merge-логики, если они вынесены в конфиг.
+
+Как работает merge
+Merge-слой — это критичная часть проекта, потому что именно он формирует финальный ответ.
+
+Типовая логика такая:
+
+Забрать спаны от regex.
+
+Забрать спаны от NER.
+
+Нормализовать формат сущностей.
+
+Удалить дубликаты.
+
+Разрешить пересечения.
+
+Оставить regex-предсказание при конфликте.
+
+Отсортировать итоговый список по start.
+
+Если у тебя в проекте несколько стратегий merge, удобно поддерживать параметр:
+
+bash
+--merge-strategy regex_priority
+Это делает поведение пайплайна явным и воспроизводимым.
+
+Локальный запуск по шагам
+Ниже командами, без объяснений.
+
+Подготовка данных:
+
+bash
+python scripts/prepare_data.py \
+  --raw-train data/raw/train.csv \
+  --raw-valid data/raw/valid.csv \
+  --output-dir data/processed
+Обучение:
+
+bash
+python scripts/train_ner.py \
+  --config configs/base.yaml \
+  --train-data data/processed/train.jsonl \
+  --valid-data data/processed/valid.jsonl \
+  --output-dir models/ner_checkpoint
+Regex-only:
+
+bash
+python scripts/predict_regex.py \
+  --test-data data/raw/private_test_dataset.csv \
+  --output data/answer/predictions_regex.csv
+NER-only:
+
+bash
+python scripts/predict_ner.py \
+  --model-path models/ner_checkpoint/model \
+  --test-data data/raw/private_test_dataset.csv \
+  --output data/answer/predictions_ner.jsonl \
+  --device cuda
+Merged:
+
+bash
+python scripts/predict_merged.py \
+  --test-data data/raw/private_test_dataset.csv \
+  --model-path models/ner_checkpoint/model \
+  --output data/answer/final_predictions.csv \
+  --merge-strategy regex_priority \
+  --device cuda
+Оценка:
+
+bash
+python scripts/evaluate.py \
+  --gold data/gold.csv \
+  --pred data/answer/final_predictions.csv \
+  --output results/evaluation.json
+Google Colab
+Если хочешь обучить модель и получить финальный файл в Colab, удобный сценарий такой.
+
+1. Включи GPU
+Открой:
+Runtime -> Change runtime type -> GPU
+
+2. Клонируй репозиторий
+python
+!git clone <URL_репозитория>
+%cd <папка_репозитория>
+3. Установи зависимости
+python
+!pip install -r requirements.txt
+4. Подготовь данные, если нужно
+python
+!python scripts/prepare_data.py \
+  --raw-train data/raw/train.csv \
+  --raw-valid data/raw/valid.csv \
+  --output-dir data/processed
+5. Обучи модель
+python
+!python scripts/train_ner.py \
+  --config configs/base.yaml \
+  --train-data data/processed/train.jsonl \
+  --valid-data data/processed/valid.jsonl \
+  --output-dir models/ner_checkpoint
+6. Получи финальный результат
+python
+!python scripts/predict_merged.py \
+  --test-data data/raw/private_test_dataset.csv \
+  --model-path models/ner_checkpoint/model \
+  --output data/answer/final_predictions.csv \
+  --merge-strategy regex_priority \
+  --device cuda
+7. Скачай итоговый CSV
+python
+from google.colab import files
+files.download("data/answer/final_predictions.csv")
+Полезные замечания
+Перед первым полноценным запуском проверь, что:
+
+реальные имена скриптов совпадают с README;
+
+пути к train/valid/test данным существуют;
+
+формат train соответствует ожидаемой схеме;
+
+модель действительно сохраняется в models/ner_checkpoint;
+
+merge-скрипт читает тот же формат, который выдает NER-скрипт.
+
+Если в проекте уже есть старые команды вроде scripts/predict.py или scripts/train_ner.py в другом интерфейсе, лучше оставить один консистентный CLI и не дублировать несколько вариантов запуска без необходимости.
 
 Ограничения
+Текущая версия проекта может требовать дополнительных доработок в следующих направлениях:
 
-Max текст 512 токенов (BERT лимит).
-Nested entities не поддерживаются (BIO схема).
-Context-dependent сущности требуют больше контекста.
-English имена не специально обработаны.
+улучшение постобработки multi-token сущностей;
 
-Roadmap
+потоковая обработка очень больших текстов;
 
-Phase 1 (current)
-- Regex + BERT hybrid
-- 7 категорий
-- Strict span F1
-- CLI инженс
+расширение числа категорий;
 
-Phase 2 (планируется)
-- ONNX quantization (3x speedup)
-- Streaming инженс (sliding window)
-- Web API (FastAPI)
+confidence score для сущностей;
 
-Phase 3 (future)
-- Nested entities (BIOES schema)
-- Cross-lingual support (mBERT)
-- OCR интеграция
-- Domain adaptation (медицина, финансы)
+мультиязычная поддержка;
 
-Запуск тестов
+более строгая валидация входных и выходных форматов.
 
-  python scripts/run_tests.py --all
-
-Примеры
-
-Входной текст:
-
-  Иван Петров, тел: +7 (495) 123-45-67, email: ivan@example.com
-
-Выход merged predict:
-
-  [[0, 11, 'ФИО'], [18, 38, 'PHONE'], [47, 67, 'EMAIL']]
-
-CSV формат:
-
-  id,prediction
-  1,"[[0, 11, 'ФИО'], [18, 38, 'PHONE'], [47, 67, 'EMAIL']]"
-
-Лицензия
-
-MIT
+License
+Proprietary.
