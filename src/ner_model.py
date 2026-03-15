@@ -19,28 +19,29 @@ from src.prepare_data import spans_to_bio_tags
 
 
 # ============================================================================
-# КОНФИГУРАЦИЯ МОДЕЛЕЙ
+# MODEL OPTIONS - SORTED BY QUALITY FOR RUSSIAN PII
 # ============================================================================
 
 MODEL_OPTIONS = {
-    "tiny": "cointegrated/rubert-tiny2",
-    "base": "cointegrated/rubert-base-cased",
-    "large": "cointegrated/rubert-large-cased",
-    "deeppavlov": "DeepPavlov/rubert-base-cased",
+    "tiny": "cointegrated/rubert-tiny2",                    # 6M params, 100MB
+    "base": "cointegrated/rubert-base-cased",               # 180M params, 440MB
+    "deeppavlov": "DeepPavlov/rubert-base-cased",          # 180M params, 440MB (more production-ready)
+    "large": "cointegrated/rubert-large-cased",            # 360M params, 1.4GB
 }
 
-
 # ============================================================================
-# NER ДАТАСЕТ
+# DATASET CLASS
 # ============================================================================
 
 class NERDataset(Dataset):
+    """Token classification dataset for NER task."""
+    
     def __init__(
         self,
         texts: List[str],
         spans: List[List[Tuple[int, int, str]]],
         tokenizer,
-        max_len: int = 512
+        max_len: int = 256
     ):
         self.texts = texts
         self.spans = spans
@@ -50,12 +51,15 @@ class NERDataset(Dataset):
         self._prepare()
 
     def _prepare(self):
+        """Convert texts and spans to tokenized format with BIO labels."""
         for text, span_list in zip(self.texts, self.spans):
             text = str(text)
             span_list = span_list or []
 
+            # Convert spans to BIO tags
             bio_tags = spans_to_bio_tags(text, span_list)
 
+            # Tokenize with offset mapping
             encoding = self.tokenizer(
                 text,
                 truncation=True,
@@ -64,9 +68,11 @@ class NERDataset(Dataset):
                 return_offsets_mapping=True,
             )
 
+            # Map BIO tags to token labels
             labels = []
             for start_char, end_char in encoding["offset_mapping"]:
                 if start_char == end_char:
+                    # Special tokens and padding
                     labels.append(-100)
                 elif start_char < len(bio_tags):
                     tag = bio_tags[start_char]
@@ -91,31 +97,49 @@ class NERDataset(Dataset):
 
 
 # ============================================================================
-# NER МОДЕЛЬ
+# NER MODEL CLASS
 # ============================================================================
 
 class NERModel:
+    """RuBERT-based NER model with multi-GPU support."""
+    
     def __init__(
         self,
-        model_name: str = "tiny",
+        model_name: str = "deeppavlov",
         output_dir: str = "ner_model",
         device: str = None
     ):
+        """
+        Initialize NER model.
+        
+        Args:
+            model_name: Model name or HuggingFace model ID
+            output_dir: Directory to save model
+            device: Device to use (auto-detect if None)
+        """
         self.output_dir = output_dir
+        
+        # Resolve model name
         self.model_name = MODEL_OPTIONS.get(model_name, model_name)
 
+        # Set device
         if device is None:
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
         else:
             self.device = device
 
-        print(f"Using device: {self.device}")
+        # Print device info
+        print(f"Device: {self.device}")
         if torch.cuda.is_available():
-            print(f"GPU count: {torch.cuda.device_count()}")
-        print(f"Using model: {self.model_name}")
+            gpu_count = torch.cuda.device_count()
+            print(f"GPU count: {gpu_count}")
+            for i in range(gpu_count):
+                print(f"  GPU {i}: {torch.cuda.get_device_name(i)}")
+        print(f"Model: {self.model_name}")
 
+        # Load tokenizer and model
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-
+        
         self.model = AutoModelForTokenClassification.from_pretrained(
             self.model_name,
             num_labels=len(LABEL2ID),
@@ -123,6 +147,7 @@ class NERModel:
             label2id=LABEL2ID,
             ignore_mismatched_sizes=True,
         )
+        
         self.model.to(self.device)
 
     def train(
@@ -130,11 +155,37 @@ class NERModel:
         train_df: pd.DataFrame,
         valid_df: pd.DataFrame = None,
         epochs: int = 3,
-        batch_size: int = 8,
+        batch_size: int = 1,
         learning_rate: float = 2e-5,
-        max_len: int = 512,
-        save_steps: int = 100
+        max_len: int = 256,
+        save_steps: int = 100,
+        gradient_accumulation_steps: int = 4,
     ) -> dict:
+        """
+        Train the NER model with multi-GPU support.
+        
+        Recommended for Kaggle T4 x2:
+          - batch_size: 1
+          - gradient_accumulation_steps: 4
+          - max_len: 256 (NOT 512)
+          - learning_rate: 2e-5
+          - epochs: 3
+        
+        Args:
+            train_df: Training DataFrame with 'text' and 'target' columns
+            valid_df: Optional validation DataFrame
+            epochs: Number of training epochs
+            batch_size: Batch size per GPU
+            learning_rate: Learning rate for optimizer
+            max_len: Maximum sequence length
+            save_steps: Save checkpoint every N steps
+            gradient_accumulation_steps: Gradient accumulation steps
+        
+        Returns:
+            Training history
+        """
+        print(f"Preparing dataset...")
+        
         train_dataset = NERDataset(
             train_df["text"].astype(str).tolist(),
             train_df["target"].tolist(),
@@ -156,24 +207,49 @@ class NERModel:
             pad_to_multiple_of=8 if torch.cuda.is_available() else None,
         )
 
+        # Check for bf16 support (compute capability >= 8.0)
+        use_bf16 = False
+        try:
+            if torch.cuda.is_available():
+                capability = torch.cuda.get_device_capability(0)
+                use_bf16 = capability[0] >= 8
+        except Exception:
+            use_bf16 = False
+
+        print(f"Using mixed precision: {'bf16' if use_bf16 else 'fp16'}")
+
         training_args = TrainingArguments(
             output_dir=self.output_dir,
             num_train_epochs=epochs,
             per_device_train_batch_size=batch_size,
             per_device_eval_batch_size=batch_size,
+            gradient_accumulation_steps=gradient_accumulation_steps,
             learning_rate=learning_rate,
             save_steps=save_steps,
             save_total_limit=2,
             logging_steps=50,
             seed=42,
-            fp16=torch.cuda.is_available(),
-            eval_strategy="steps" if eval_dataset is not None else "no",
+            fp16=torch.cuda.is_available() and not use_bf16,
+            bf16=use_bf16,
+            eval_strategy="no",
             save_strategy="steps",
             report_to="none",
             remove_unused_columns=False,
             optim="adamw_torch",
+            gradient_checkpointing=True,
             dataloader_pin_memory=torch.cuda.is_available(),
+            max_grad_norm=1.0,
+            warmup_steps=100,
+            weight_decay=0.01,
         )
+
+        print(f"Training arguments:")
+        print(f"  batch_size: {batch_size}")
+        print(f"  gradient_accumulation_steps: {gradient_accumulation_steps}")
+        print(f"  effective_batch_size: {batch_size * gradient_accumulation_steps * torch.cuda.device_count()}")
+        print(f"  max_len: {max_len}")
+        print(f"  epochs: {epochs}")
+        print(f"  learning_rate: {learning_rate}")
 
         trainer = Trainer(
             model=self.model,
@@ -183,14 +259,26 @@ class NERModel:
             data_collator=data_collator,
         )
 
+        print(f"Starting training on {len(train_dataset)} samples...")
         trainer.train()
+        
         trainer.save_model(self.output_dir)
         self.tokenizer.save_pretrained(self.output_dir)
 
         print(f"Model saved to {self.output_dir}")
         return trainer.state.log_history
 
-    def predict_text(self, text: str, max_len: int = 512) -> List[Tuple[int, int, str]]:
+    def predict_text(self, text: str, max_len: int = 256) -> List[Tuple[int, int, str]]:
+        """
+        Predict NER spans for a single text.
+        
+        Args:
+            text: Input text
+            max_len: Maximum sequence length
+        
+        Returns:
+            List of (start, end, label) tuples
+        """
         text = str(text)
 
         encoding = self.tokenizer(
@@ -244,6 +332,7 @@ class NERModel:
         if current_start is not None:
             spans.append((current_start, current_end, current_label))
 
+        # Deduplicate and sort
         return sorted(set(spans), key=lambda x: (x[0], x[1], x[2]))
 
     def predict_batch(
@@ -251,6 +340,16 @@ class NERModel:
         texts: List[str],
         batch_size: int = 4
     ) -> List[List[Tuple[int, int, str]]]:
+        """
+        Predict NER spans for a batch of texts.
+        
+        Args:
+            texts: List of input texts
+            batch_size: Batch size for prediction
+        
+        Returns:
+            List of predictions
+        """
         predictions = []
 
         for i in tqdm(range(0, len(texts), batch_size), desc="NER prediction"):
@@ -261,6 +360,7 @@ class NERModel:
         return predictions
 
     def load(self):
+        """Load a saved model."""
         if not os.path.exists(self.output_dir):
             raise FileNotFoundError(f"Model directory {self.output_dir} not found")
 
