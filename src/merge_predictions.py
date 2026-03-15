@@ -2,7 +2,11 @@ from typing import List, Tuple
 
 
 def merge_predictions(regex_spans: List[Tuple[int, int, str]], ner_spans: List[Tuple[int, int, str]]) -> List[Tuple[int, int, str]]:
-    """Merge: regex имеет приоритет, NER добавляется если не пересекается."""
+    """
+    Merge: regex имеет приоритет, NER добавляется если не пересекается.
+    
+    Формат: [(start, end, label), ...]
+    """
     
     if not regex_spans and not ner_spans:
         return []

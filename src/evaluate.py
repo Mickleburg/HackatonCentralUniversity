@@ -1,8 +1,13 @@
 import pandas as pd
+from typing import List, Tuple
 
 
-def compute_metrics(predictions, targets):
-    """Strict span match: start, end, label должны совпадать."""
+def compute_metrics(predictions: List[List[Tuple[int, int, str]]], targets: List[List[Tuple[int, int, str]]]):
+    """
+    Strict span match: (start, end, label) должны совпадать точно.
+    
+    Формат: [(start, end, label), ...]
+    """
     tp = 0
     fp = 0
     fn = 0
@@ -13,11 +18,11 @@ def compute_metrics(predictions, targets):
         
         for span in pred:
             if isinstance(span, (list, tuple)) and len(span) >= 3:
-                pred_set.add((span[0], span[1], span[2]))
+                pred_set.add((int(span[0]), int(span[1]), str(span[2])))
         
         for span in target:
             if isinstance(span, (list, tuple)) and len(span) >= 3:
-                target_set.add((span[0], span[1], span[2]))
+                target_set.add((int(span[0]), int(span[1]), str(span[2])))
 
         tp += len(pred_set & target_set)
         fp += len(pred_set - target_set)
@@ -34,8 +39,8 @@ def compute_metrics(predictions, targets):
     }
 
 
-def save_metrics(rows, output_path: str):
-    """Сохраняем метрики."""
+def save_metrics(rows: List[dict], output_path: str):
+    """Сохраняем метрики в CSV."""
     if not rows:
         rows = [{"model": "none", "dataset": "none", "precision": 0, "recall": 0, "micro_f1": 0}]
     

@@ -59,10 +59,7 @@ class TokenDataset(Dataset):
             
             labels = []
             for tag in bio_tags:
-                if tag == "O":
-                    labels.append(TAG2ID["O"])
-                else:
-                    labels.append(TAG2ID.get(tag, TAG2ID["O"]))
+                labels.append(TAG2ID.get(tag, TAG2ID["O"]))
 
             self.items.append(
                 {
@@ -91,7 +88,7 @@ def build_model():
 
 
 def train_ner(train_df: pd.DataFrame, epochs: int = 2, batch_size: int = 8):
-    """Обучаем NER на всём датасете train_df."""
+    """Обучаем NER на ВСЕ тренировочные данные."""
     set_seed(SEED)
     tokenizer, model = build_model()
 
@@ -102,7 +99,7 @@ def train_ner(train_df: pd.DataFrame, epochs: int = 2, batch_size: int = 8):
         tokenizer=tokenizer,
         max_len=MAX_LENGTH,
     )
-    print(f"Dataset built with {len(dataset)} items")
+    print(f"Dataset built: {len(dataset)} items")
 
     training_args = TrainingArguments(
         output_dir=MODEL_DIR,
@@ -144,7 +141,7 @@ def load_ner():
 
 
 def clean_spans(spans: List[Tuple[int, int, str]]) -> List[Tuple[int, int, str]]:
-    """Удаляем инвалидные spans и дубликаты."""
+    """Удаляем инвалидные и перекрывающиеся spans."""
     spans = sorted(spans, key=lambda x: (x[0], x[1]))
     result = []
     
@@ -161,7 +158,7 @@ def clean_spans(spans: List[Tuple[int, int, str]]) -> List[Tuple[int, int, str]]
 
 
 def predict_one(text: str, tokenizer, model) -> List[Tuple[int, int, str]]:
-    """Предсказываем сущности для одного текста."""
+    """Предсказываем сущности для одного текста в формате [(start, end, label), ...]."""
     enc = tokenizer(
         text,
         truncation=True,
@@ -201,10 +198,9 @@ def predict_one(text: str, tokenizer, model) -> List[Tuple[int, int, str]]:
             continue
 
         if "-" not in tag:
-            tag = f"O"
             if current_label is not None:
                 spans.append((current_start, current_end, current_label))
-                current_start, current_end, current_label = None, None, None
+            current_start, current_end, current_label = None, None, None
             continue
 
         prefix, label = tag.split("-", 1)
@@ -229,7 +225,7 @@ def predict_one(text: str, tokenizer, model) -> List[Tuple[int, int, str]]:
 
 
 def predict_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-    """Предсказываем для всего датасета."""
+    """Предсказываем для датасета и возвращаем в формате [(start, end, label), ...]."""
     tokenizer, model = load_ner()
     rows = []
 

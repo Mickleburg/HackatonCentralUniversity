@@ -55,7 +55,7 @@ RULE_ONLY_ENTITIES = list(PII_PATTERNS.keys())
 CONTEXT_KEYWORDS: Dict[str, List[str]] = {
     "CVV/CVC": ["cvv", "cvc", "cvc2"],
     "Номер карты": ["карт", "card", "номер карты"],
-    "Номер телефона": ["телефон", "сбп", "смс", "звон", "номер", "телефон"],
+    "Номер телефона": ["телефон", "сбп", "смс", "звон", "номер"],
     "Email": ["email", "e-mail", "почт", "письм"],
     "ПИН код": ["пин", "pin", "код"],
     "Номер банковского счета": ["счет", "расчетн", "банковск"],
@@ -99,7 +99,10 @@ def _remove_overlaps(candidates: List[Tuple[int, int, str]]) -> List[Tuple[int, 
 
 
 def detect_pii(text: str, context_radius: int = 30) -> List[Tuple[int, int, str]]:
-    """Regex-детектор сущностей с контекстом."""
+    """
+    Детектим сущности по regex.
+    Возвращаем список [(start, end, label), ...]
+    """
     if not text:
         return []
     
