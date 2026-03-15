@@ -109,13 +109,11 @@ regex:
   max_text_length: 10000
 
 # NER model configuration
-ner:
-  model_name: DeepPavlov/rubert-base-cased
-  model_type: bert
-  # Number of entity labels + BIO tags
-  num_labels: 31  # (10 categories * 3 BIO) + 1 (O-tag)
-  # Tokenizer configuration
-  tokenizer:
+  ner:
+    model_name: DeepPavlov/distilrubert-tiny-cased-conversational-v1  # ← Было rubert-base-cased
+    model_type: bert  # Оставляем как есть (совместимо с Transformers)
+    num_labels: 31  # Не меняем (зависит от ваших лейблов + BIO)
+    tokenizer:  # Не меняем — модель использует стандартный tokenizer (vocabulary 31K, max_length=512 подходит)
     max_length: 512
     truncation: true
     padding: max_length
