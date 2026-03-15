@@ -1,0 +1,149 @@
+import torch
+import numpy as np
+import pandas as pd
+from transformers import AutoTokenizer, AutoModelForTokenClassification, Trainer, TrainingArguments
+from torch.utils.data import Dataset
+from typing import List, Tuple
+from tqdm import tqdm
+import os
+
+from src.labels import LABEL2ID, ID2LABEL, LABELS
+from src.prepare_data import spans_to_bio_tags
+
+class NERDataset(Dataset):
+    def __init__(self, texts: List[str], spans: List[List[Tuple[int, int, str]]], tokenizer, max_len=512):
+        self.texts = texts
+        self.spans = spans
+        self.tokenizer = tokenizer
+        self.max_len = max_len
+        self.encodings = []
+        self._prepare()
+    
+    def _prepare(self):
+        for text, span_list in zip(self.texts, self.spans):
+            bio_tags = spans_to_bio_tags(text, span_list)
+            encoding = self.tokenizer(
+                text,
+                truncation=True,
+                max_length=self.max_len,
+                padding="max_length",
+                return_offsets_mapping=True,
+            )
+            
+            labels = []
+            for i, offset in enumerate(encoding["offset_mapping"]):
+                if offset[0] == offset[1]:
+                    labels.append(-100)
+                else:
+                    char_idx = offset[0]
+                    if char_idx < len(bio_tags):
+                        tag = bio_tags[char_idx]
+                        labels.append(LABEL2ID.get(tag, LABEL2ID.get("O", 0)))
+                    else:
+                        labels.append(LABEL2ID.get("O", 0))
+            
+            encoding["labels"] = labels
+            del encoding["offset_mapping"]
+            self.encodings.append(encoding)
+    
+    def __len__(self):
+        return len(self.encodings)
+    
+    def __getitem__(self, idx):
+        enc = self.encodings[idx]
+        return {
+            "input_ids": torch.tensor(enc["input_ids"]),
+            "attention_mask": torch.tensor(enc["attention_mask"]),
+            "labels": torch.tensor(enc["labels"]),
+        }
+
+class NERModel:
+    def __init__(self, model_name="cointegrated/rubert-tiny2", output_dir="ner_model"):
+        self.model_name = model_name
+        self.output_dir = output_dir
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self.model = AutoModelForTokenClassification.from_pretrained(
+            model_name, num_labels=len(LABELS) + 1
+        )
+    
+    def train(self, train_df, valid_df=None, epochs=3, batch_size=8, max_len=512):
+        train_dataset = NERDataset(
+            train_df["text"].tolist(),
+            train_df["target"].tolist(),
+            self.tokenizer,
+            max_len=max_len,
+        )
+        
+        training_args = TrainingArguments(
+            output_dir=self.output_dir,
+            num_train_epochs=epochs,
+            per_device_train_batch_size=batch_size,
+            save_steps=100,
+            save_total_limit=2,
+            logging_steps=100,
+            seed=42,
+        )
+        
+        trainer = Trainer(
+            model=self.model,
+            args=training_args,
+            train_dataset=train_dataset,
+        )
+        
+        trainer.train()
+        self.model.save_pretrained(self.output_dir)
+        self.tokenizer.save_pretrained(self.output_dir)
+    
+    def predict_text(self, text: str, max_len=512) -> List[Tuple[int, int, str]]:
+        encoding = self.tokenizer(
+            text,
+            truncation=True,
+            max_length=max_len,
+            return_offsets_mapping=True,
+            return_tensors="pt",
+        )
+        
+        offset_mapping = encoding.pop("offset_mapping")[0].numpy()
+        
+        with torch.no_grad():
+            outputs = self.model(**encoding)
+            logits = outputs.logits[0].cpu().numpy()
+        
+        pred_labels = np.argmax(logits, axis=1)
+        spans = []
+        current_span = None
+        current_label = None
+        
+        for i, (pred_id, offset) in enumerate(zip(pred_labels, offset_mapping)):
+            if pred_id == 0 or offset[0] == offset[1]:
+                if current_span is not None:
+                    spans.append((current_span[0], current_span[1], current_label))
+                current_span = None
+                current_label = None
+            else:
+                label = ID2LABEL.get(pred_id, "O").replace("B-", "").replace("I-", "")
+                if current_label != label or ID2LABEL.get(pred_id, "").startswith("B-"):
+                    if current_span is not None:
+                        spans.append((current_span[0], current_span[1], current_label))
+                    current_span = (offset[0], offset[1])
+                    current_label = label
+                else:
+                    if current_span is not None:
+                        current_span = (current_span[0], offset[1])
+        
+        if current_span is not None:
+            spans.append((current_span[0], current_span[1], current_label))
+        
+        return sorted(spans, key=lambda x: x[0])
+    
+    def predict_batch(self, texts: List[str]) -> List[List[Tuple[int, int, str]]]:
+        predictions = []
+        for text in tqdm(texts, desc="NER prediction"):
+            pred = self.predict_text(text)
+            predictions.append(pred)
+        return predictions
+    
+    def load(self):
+        if os.path.exists(self.output_dir):
+            self.model = AutoModelForTokenClassification.from_pretrained(self.output_dir)
+            self.tokenizer = AutoTokenizer.from_pretrained(self.output_dir)
