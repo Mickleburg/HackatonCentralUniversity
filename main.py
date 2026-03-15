@@ -102,7 +102,9 @@ def ner_train_command(args):
     train_df["target"] = train_df["target"].apply(parse_target)
     
     print(f"Training on {len(train_df)} samples...")
-    model = NERModel()
+
+    model = NERModel(model_name="deeppavlov")
+
     model.train(train_df, epochs=3, batch_size=8, max_len=512)
     print("✓ NER model trained and saved")
 
