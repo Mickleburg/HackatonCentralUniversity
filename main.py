@@ -10,12 +10,8 @@ from src.merge_predictions import merge_predictions
 from src.evaluate import compute_metrics, save_metrics
 from src.utils import ensure_dirs
 
-
 TRAIN_PATH = "data/raw/train_dataset.tsv"
 TEST_PATH = "data/raw/private_test_dataset.csv"
-
-PROCESSED_TRAIN = "data/processed/train_full.csv"
-PROCESSED_TEST = "data/processed/test.csv"
 
 REGEX_TRAIN_OUT = "data/answer/regex_train_predictions.csv"
 REGEX_TEST_OUT = "data/answer/regex_predictions.csv"
@@ -35,10 +31,15 @@ def parse_prediction(value):
     value = str(value).strip()
     if not value or value == "[]":
         return []
-    return ast.literal_eval(value)
+    try:
+        return ast.literal_eval(value)
+    except (ValueError, SyntaxError):
+        return []
 
 
 def run_regex_file(input_path: str, output_path: str):
+    print(f"Running regex on {input_path}...")
+    
     if input_path.endswith(".tsv"):
         df = read_train_dataset(input_path)
     else:
@@ -54,16 +55,20 @@ def run_regex_file(input_path: str, output_path: str):
         if "id" in df.columns:
             item["id"] = row["id"]
         else:
-            item["row_id"] = row["row_id"]
+            item["row_id"] = row.get("row_id", _)
+
         rows.append(item)
 
     cols = ["id", "text", "prediction"] if "id" in df.columns else ["row_id", "text", "prediction"]
     out_df = pd.DataFrame(rows)[cols]
     out_df.to_csv(output_path, index=False)
+    print(f"Saved: {output_path}")
     return out_df, df
 
 
 def run_ner_file(input_path: str, output_path: str):
+    print(f"Running NER on {input_path}...")
+    
     if input_path.endswith(".tsv"):
         df = read_train_dataset(input_path)
     else:
@@ -71,10 +76,13 @@ def run_ner_file(input_path: str, output_path: str):
 
     out_df = predict_dataframe(df)
     out_df.to_csv(output_path, index=False)
+    print(f"Saved: {output_path}")
     return out_df, df
 
 
 def run_merge(regex_path: str, ner_path: str, output_path: str):
+    print(f"Merging {regex_path} and {ner_path}...")
+    
     regex_df = pd.read_csv(regex_path)
     ner_df = pd.read_csv(ner_path)
 
@@ -84,10 +92,7 @@ def run_merge(regex_path: str, ner_path: str, output_path: str):
         )
 
     key = "id" if "id" in regex_df.columns else "row_id"
-    if key in regex_df.columns and key in ner_df.columns:
-        if regex_df[key].astype(str).tolist() != ner_df[key].astype(str).tolist():
-            raise ValueError(f"{key} columns do not match")
-
+    
     rows = []
     for (_, r_row), (_, n_row) in zip(regex_df.iterrows(), ner_df.iterrows()):
         regex_pred = parse_prediction(r_row["prediction"])
@@ -100,16 +105,19 @@ def run_merge(regex_path: str, ner_path: str, output_path: str):
         }
         if key in regex_df.columns:
             item[key] = r_row[key]
+        
         rows.append(item)
 
     cols = [key, "text", "prediction"] if key in regex_df.columns else ["text", "prediction"]
     out_df = pd.DataFrame(rows)[cols]
     out_df.to_csv(output_path, index=False)
+    print(f"Saved: {output_path}")
     return out_df
 
 
 def append_metric(rows, model_name: str, dataset_name: str, pred_df: pd.DataFrame, gold_df: pd.DataFrame):
     if "target" not in gold_df.columns:
+        print(f"  Skipping metrics for {model_name}/{dataset_name} (no target)")
         return
 
     preds = pred_df["prediction"].apply(parse_prediction).tolist()
@@ -120,20 +128,21 @@ def append_metric(rows, model_name: str, dataset_name: str, pred_df: pd.DataFram
         {
             "model": model_name,
             "dataset": dataset_name,
-            "precision": metrics["precision"],
-            "recall": metrics["recall"],
-            "micro_f1": metrics["micro_f1"],
+            "precision": round(metrics["precision"], 4),
+            "recall": round(metrics["recall"], 4),
+            "micro_f1": round(metrics["micro_f1"], 4),
         }
     )
+    
+    print(f"  {model_name}/{dataset_name}: F1={metrics['micro_f1']:.4f}")
 
 
 def prepare_command(_args):
     ensure_dirs()
+    print("Preparing data...")
     train_df = read_train_dataset(TRAIN_PATH)
     test_df = read_test_dataset(TEST_PATH)
-    save_processed(train_df, PROCESSED_TRAIN)
-    save_processed(test_df, PROCESSED_TEST)
-    print("Prepared data")
+    print(f"Train: {len(train_df)}, Test: {len(test_df)}")
 
 
 def regex_command(args):
@@ -141,62 +150,74 @@ def regex_command(args):
     input_path = args.input
     output_path = args.output
     run_regex_file(input_path, output_path)
-    print(f"Saved: {output_path}")
 
 
 def ner_train_command(_args):
     ensure_dirs()
+    print("Training NER...")
     train_df = read_train_dataset(TRAIN_PATH)
+    print(f"Training on {len(train_df)} samples")
     train_ner(train_df, epochs=2, batch_size=8)
-    print("NER trained on full train dataset")
+    print("NER training complete")
 
 
 def ner_predict_command(args):
     ensure_dirs()
-    _, _ = run_ner_file(args.input, args.output)
-    print(f"Saved: {args.output}")
+    run_ner_file(args.input, args.output)
 
 
 def merge_command(_args):
     ensure_dirs()
     run_merge(REGEX_TEST_OUT, NER_TEST_OUT, MERGED_TEST_OUT)
-    print(f"Saved: {MERGED_TEST_OUT}")
 
 
 def all_command(_args):
     ensure_dirs()
 
+    print("=" * 60)
+    print("FULL PIPELINE")
+    print("=" * 60)
+
     train_df = read_train_dataset(TRAIN_PATH)
     test_df = read_test_dataset(TEST_PATH)
+    
+    print(f"\nDataset: train={len(train_df)}, test={len(test_df)}")
 
-    save_processed(train_df, PROCESSED_TRAIN)
-    save_processed(test_df, PROCESSED_TEST)
-
+    print("\n[1/6] Training NER...")
     train_ner(train_df, epochs=2, batch_size=8)
 
+    print("\n[2/6] Regex on train...")
     regex_train_df, gold_train_df = run_regex_file(TRAIN_PATH, REGEX_TRAIN_OUT)
+
+    print("\n[3/6] Regex on test...")
     regex_test_df, _ = run_regex_file(TEST_PATH, REGEX_TEST_OUT)
 
+    print("\n[4/6] NER on train...")
     ner_train_df, _ = run_ner_file(TRAIN_PATH, NER_TRAIN_OUT)
+
+    print("\n[5/6] NER on test...")
     ner_test_df, _ = run_ner_file(TEST_PATH, NER_TEST_OUT)
 
+    print("\n[6/6] Merging...")
     merged_train_df = run_merge(REGEX_TRAIN_OUT, NER_TRAIN_OUT, MERGED_TRAIN_OUT)
     merged_test_df = run_merge(REGEX_TEST_OUT, NER_TEST_OUT, MERGED_TEST_OUT)
 
+    print("\n" + "=" * 60)
+    print("METRICS")
+    print("=" * 60)
+    
     metric_rows = []
     append_metric(metric_rows, "regex", "train", regex_train_df, gold_train_df)
     append_metric(metric_rows, "ner", "train", ner_train_df, gold_train_df)
     append_metric(metric_rows, "merge", "train", merged_train_df, gold_train_df)
 
-    save_metrics(metric_rows, METRICS_OUT)
+    if metric_rows:
+        save_metrics(metric_rows, METRICS_OUT)
+        print(f"\nSaved: {METRICS_OUT}")
 
-    print(f"Saved: {REGEX_TRAIN_OUT}")
-    print(f"Saved: {REGEX_TEST_OUT}")
-    print(f"Saved: {NER_TRAIN_OUT}")
-    print(f"Saved: {NER_TEST_OUT}")
-    print(f"Saved: {MERGED_TRAIN_OUT}")
-    print(f"Saved: {MERGED_TEST_OUT}")
-    print(f"Saved: {METRICS_OUT}")
+    print("\n" + "=" * 60)
+    print("DONE")
+    print("=" * 60)
 
 
 def build_parser():

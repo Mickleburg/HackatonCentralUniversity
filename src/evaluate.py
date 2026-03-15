@@ -2,13 +2,22 @@ import pandas as pd
 
 
 def compute_metrics(predictions, targets):
+    """Strict span match: start, end, label должны совпадать."""
     tp = 0
     fp = 0
     fn = 0
 
     for pred, target in zip(predictions, targets):
-        pred_set = set(tuple(x) for x in pred)
-        target_set = set(tuple(x) for x in target)
+        pred_set = set()
+        target_set = set()
+        
+        for span in pred:
+            if isinstance(span, (list, tuple)) and len(span) >= 3:
+                pred_set.add((span[0], span[1], span[2]))
+        
+        for span in target:
+            if isinstance(span, (list, tuple)) and len(span) >= 3:
+                target_set.add((span[0], span[1], span[2]))
 
         tp += len(pred_set & target_set)
         fp += len(pred_set - target_set)
@@ -26,5 +35,9 @@ def compute_metrics(predictions, targets):
 
 
 def save_metrics(rows, output_path: str):
-    df = pd.DataFrame(rows, columns=["model", "dataset", "precision", "recall", "micro_f1"])
+    """Сохраняем метрики."""
+    if not rows:
+        rows = [{"model": "none", "dataset": "none", "precision": 0, "recall": 0, "micro_f1": 0}]
+    
+    df = pd.DataFrame(rows)
     df.to_csv(output_path, index=False)

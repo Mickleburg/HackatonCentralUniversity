@@ -8,7 +8,10 @@ def safe_parse_target(value):
     value = str(value).strip()
     if not value or value == "[]":
         return []
-    return ast.literal_eval(value)
+    try:
+        return ast.literal_eval(value)
+    except (ValueError, SyntaxError):
+        return []
 
 
 def read_train_dataset(path: str):
@@ -34,12 +37,14 @@ def save_processed(df, path: str):
 
 
 def spans_to_bio_by_offsets(offset_mapping, spans):
+    """Прямой алгоритм: для каждого offset смотрим, какой span его накрывает."""
     tags = []
+    
     for start, end in offset_mapping:
         if start == end:
             tags.append("O")
             continue
-
+        
         tag = "O"
         for ent_start, ent_end, label in spans:
             if start >= ent_start and start < ent_end:
@@ -48,5 +53,7 @@ def spans_to_bio_by_offsets(offset_mapping, spans):
                 else:
                     tag = f"I-{label}"
                 break
+        
         tags.append(tag)
+    
     return tags

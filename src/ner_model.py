@@ -1,5 +1,4 @@
 import os
-import ast
 import random
 from typing import List, Tuple
 
@@ -16,7 +15,6 @@ from transformers import (
 
 from src.labels import LABELS
 from src.prepare_data import spans_to_bio_by_offsets
-
 
 MODEL_NAME = "cointegrated/rubert-tiny2"
 MODEL_DIR = "data/processed/ner_model"
@@ -42,26 +40,29 @@ ID2TAG = {i: tag for tag, i in TAG2ID.items()}
 
 
 class TokenDataset(Dataset):
-    def __init__(self, texts: List[str], targets: List[List[Tuple[int, int, str]]], tokenizer):
+    def __init__(self, texts: List[str], targets: List[List[Tuple[int, int, str]]], tokenizer, max_len=MAX_LENGTH):
         self.items = []
+        self.tokenizer = tokenizer
+        self.max_len = max_len
 
         for text, spans in zip(texts, targets):
             enc = tokenizer(
                 text,
                 truncation=True,
                 padding="max_length",
-                max_length=MAX_LENGTH,
+                max_length=max_len,
                 return_offsets_mapping=True,
             )
 
-            bio_tags = spans_to_bio_by_offsets(enc["offset_mapping"], spans)
+            offset_mapping = enc["offset_mapping"]
+            bio_tags = spans_to_bio_by_offsets(offset_mapping, spans)
+            
             labels = []
-
-            for offset, tag in zip(enc["offset_mapping"], bio_tags):
-                if offset[0] == offset[1]:
-                    labels.append(-100)
+            for tag in bio_tags:
+                if tag == "O":
+                    labels.append(TAG2ID["O"])
                 else:
-                    labels.append(TAG2ID[tag])
+                    labels.append(TAG2ID.get(tag, TAG2ID["O"]))
 
             self.items.append(
                 {
@@ -90,14 +91,18 @@ def build_model():
 
 
 def train_ner(train_df: pd.DataFrame, epochs: int = 2, batch_size: int = 8):
+    """Обучаем NER на всём датасете train_df."""
     set_seed(SEED)
     tokenizer, model = build_model()
 
+    print(f"Building dataset with {len(train_df)} samples...")
     dataset = TokenDataset(
         texts=train_df["text"].tolist(),
         targets=train_df["target"].tolist(),
         tokenizer=tokenizer,
+        max_len=MAX_LENGTH,
     )
+    print(f"Dataset built with {len(dataset)} items")
 
     training_args = TrainingArguments(
         output_dir=MODEL_DIR,
@@ -106,7 +111,7 @@ def train_ner(train_df: pd.DataFrame, epochs: int = 2, batch_size: int = 8):
         per_device_train_batch_size=batch_size,
         learning_rate=3e-5,
         weight_decay=0.01,
-        logging_steps=50,
+        logging_steps=100,
         save_strategy="epoch",
         eval_strategy="no",
         do_eval=False,
@@ -129,6 +134,7 @@ def train_ner(train_df: pd.DataFrame, epochs: int = 2, batch_size: int = 8):
 
 
 def load_ner():
+    """Загружаем обученную модель."""
     tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR)
     model = AutoModelForTokenClassification.from_pretrained(MODEL_DIR)
     model.eval()
@@ -138,17 +144,24 @@ def load_ner():
 
 
 def clean_spans(spans: List[Tuple[int, int, str]]) -> List[Tuple[int, int, str]]:
-    spans = sorted(spans, key=lambda x: (x[0], x[1], x[2]))
+    """Удаляем инвалидные spans и дубликаты."""
+    spans = sorted(spans, key=lambda x: (x[0], x[1]))
     result = []
-    for span in spans:
-        if span[0] >= span[1]:
+    
+    for start, end, label in spans:
+        if start >= end:
             continue
-        if not result or span[0] >= result[-1][1]:
-            result.append(span)
+        
+        if result and start < result[-1][1]:
+            continue
+        
+        result.append((start, end, label))
+    
     return result
 
 
 def predict_one(text: str, tokenizer, model) -> List[Tuple[int, int, str]]:
+    """Предсказываем сущности для одного текста."""
     enc = tokenizer(
         text,
         truncation=True,
@@ -166,8 +179,8 @@ def predict_one(text: str, tokenizer, model) -> List[Tuple[int, int, str]]:
     with torch.no_grad():
         logits = model(**enc).logits[0].detach().cpu().numpy()
 
-    pred_ids = logits.argmax(axis=-1).tolist()
-    pred_tags = [ID2TAG[i] for i in pred_ids]
+    pred_ids = np.argmax(logits, axis=-1)
+    pred_tags = [ID2TAG.get(int(i), "O") for i in pred_ids]
 
     spans = []
     current_start = None
@@ -176,9 +189,19 @@ def predict_one(text: str, tokenizer, model) -> List[Tuple[int, int, str]]:
 
     for tag, (start, end) in zip(pred_tags, offset_mapping):
         if start == end:
+            if current_label is not None:
+                spans.append((current_start, current_end, current_label))
+                current_start, current_end, current_label = None, None, None
             continue
 
         if tag == "O":
+            if current_label is not None:
+                spans.append((current_start, current_end, current_label))
+                current_start, current_end, current_label = None, None, None
+            continue
+
+        if "-" not in tag:
+            tag = f"O"
             if current_label is not None:
                 spans.append((current_start, current_end, current_label))
                 current_start, current_end, current_label = None, None, None
@@ -190,8 +213,9 @@ def predict_one(text: str, tokenizer, model) -> List[Tuple[int, int, str]]:
             if current_label is not None:
                 spans.append((current_start, current_end, current_label))
             current_start, current_end, current_label = start, end, label
-        else:
-            if current_label == label and current_end is not None and start <= current_end:
+
+        elif prefix == "I":
+            if current_label == label and current_start is not None:
                 current_end = end
             else:
                 if current_label is not None:
@@ -205,10 +229,11 @@ def predict_one(text: str, tokenizer, model) -> List[Tuple[int, int, str]]:
 
 
 def predict_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """Предсказываем для всего датасета."""
     tokenizer, model = load_ner()
     rows = []
 
-    for _, row in df.iterrows():
+    for idx, row in df.iterrows():
         text = row["text"]
         prediction = predict_one(text, tokenizer, model)
 
@@ -217,10 +242,10 @@ def predict_dataframe(df: pd.DataFrame) -> pd.DataFrame:
             "prediction": str(prediction),
         }
 
-        if "id" in row.index:
+        if "id" in df.columns:
             out["id"] = row["id"]
         else:
-            out["row_id"] = row["row_id"]
+            out["row_id"] = row.get("row_id", idx)
 
         rows.append(out)
 
